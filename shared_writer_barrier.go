@@ -1,10 +1,16 @@
 package disruptor
 
-import "math"
+import (
+	"math"
+	"runtime"
+	"sync/atomic"
+	"time"
+)
 
 type SharedWriterBarrier struct {
 	written   *Cursor
 	committed []int32
+	commiting int32 // 自旋锁
 	capacity  int64
 	mask      int64
 	shift     uint8
@@ -33,9 +39,22 @@ func (this *SharedWriterBarrier) Read(lower int64) int64 {
 	shift, mask := this.shift, this.mask
 	upper := this.written.Load()
 
-	for ; lower <= upper; lower++ {
-		if this.committed[lower&mask] != int32(lower>>shift) {
-			return lower - 1
+	// 自旋锁
+	for {
+		if atomic.CompareAndSwapInt32(&this.commiting, 0, 1) {
+			for ; lower <= upper; lower++ {
+				if this.committed[lower&mask] != int32(lower>>shift) {
+					// 解锁
+					atomic.StoreInt32(&this.commiting, 0)
+					return lower - 1
+				}
+			}
+			// 解锁
+			atomic.StoreInt32(&this.commiting, 0)
+			break
+		} else {
+			time.Sleep(time.Millisecond)
+			runtime.Gosched()
 		}
 	}
 
